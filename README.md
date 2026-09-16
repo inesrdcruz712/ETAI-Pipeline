@@ -1,5 +1,12 @@
 # Baseline Predictive Pipeline -- ETAI
 
+20260676 - Inês Cruz
+
+16/09/2026
+Current best score: Logistic Regression is the better choice because it generalizes better to unseen data and is less prone to overfitting than a Decision Tree.
+The gap between train and test is lower than in decision tree.
+Its simpler structure makes it more stable and less dependent on the specific patterns in the training set.
+
 This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
 The task: predict two-year recidivism using ProPublica's COMPAS
