@@ -7,6 +7,12 @@ Current best score: Logistic Regression is the better choice because it generali
 The gap between train and test is lower than in decision tree.
 Its simpler structure makes it more stable and less dependent on the specific patterns in the training set.
 
+26/09/2026
+Data cleaning implemented in data_cleaning(): placeholder tokens ("-", "?", "N/A", etc.) converted to NaN; sex, race, c_charge_degree, score_text spellings standardized to canonical form; redundant columns dropped (prior_offenses, age_in_months, juvenile_total); 72 exact duplicate rows removed; out-of-range values (age, decile_score, juv_fel_count, priors_count) set to NaN; MNAR indicator columns added (priors_count_missing, c_charge_degree_missing) before imputing; missing values imputed (median for numeric features, most frequent for categorical features), race and decile_score left unimputed since they're not model features.
+preprocess()'s dropna() updated to only check model-feature columns, so missing race/decile_score no longer drops otherwise-complete rows.
+Dataset: 7286 rows x 16 cols -> 7214 rows x 15 cols.
+Known limitations: imputation statistics computed on full dataset, not just train split (leakage, to fix when encoding/scaling pipeline is built); fairness_report silently drops ~12 rows with missing race due to pandas groupby default behavior.
+
 This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
 The task: predict two-year recidivism using ProPublica's COMPAS
