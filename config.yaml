@@ -7,22 +7,43 @@ data:
   sensitive_attr: "race"          # excluded from model features, used only to audit fairness
   drop_columns: ["id", "decile_score", "score_text"]  # identifiers / COMPAS's own score, not our model's inputs
 
-split:
-  test_size: 0.2
+# the FINAL test set: set aside once by split_dev_test(), stratified, never fitted on, tuned on or scored.
+# Don't change these after week 4 -- a new seed would let you "see" different test rows.
+test_set:
+  size: 0.2
+  random_state: 42
+
+# models are judged by stratified k-fold cross-validation of the whole pipeline on the development set
+cv:
+  n_splits: 5
+  shuffle: true
   random_state: 42
 
 diagnostics:
   id_column: "id"
-  candidate_predictors: ["sex", "race", "age_cat", "c_charge_degree", "score_text"]
   # columns that load as text purely because a placeholder token (see placeholder_tokens below)
   # shows up somewhere in them
   numeric_text_columns: ["priors_count", "prior_offenses"]
-  placeholder_tokens: ["-", "?", "n/a", "N/A", "na", "NA", ""]
+  # "nan" must be listed: the category cleanup turns text into str first, which turns a genuine NaN into
+  # the string "nan" -- listed tokens go back to NaN in its last step, so no fake category survives
+  placeholder_tokens: ["-", "?", "n/a", "N/A", "na", "NA", "", "nan"]
   validity_rules:
     age: {min: 18, max: 100}
     decile_score: {min: 1, max: 10}
     juv_fel_count: {min: 0}
+    juv_misd_count: {min: 0}      # counts can't be negative (no violations today, but cheap to guard)
+    juv_other_count: {min: 0}
     priors_count: {min: 0, max: 60}
+  # a number and the category derived from it can each be valid but contradict each other. We can't tell
+  # which one is wrong, so BOTH become NaN and get imputed (bounds inclusive: age 25 / 45 sit on a bucket
+  # boundary, so both neighbouring buckets accept them)
+  consistency_checks:
+    - numeric: age
+      category: age_cat
+      ranges:
+        "Less than 25": {max: 25}
+        "25 - 45": {min: 25, max: 45}
+        "Greater than 45": {min: 45}
   canonical_categories:
     sex:
       male: "Male"
@@ -44,23 +65,29 @@ diagnostics:
       low: "Low"
       medium: "Medium"
       high: "High"
-  # multicollinearity casualties (see the EDA notebook's correlation heatmap + VIF section) --
-  # also listed in data.drop_columns above; kept here too so preprocessing.py doesn't need
-  # to reach into the data: section to know what to drop
+  # multicollinearity casualties (EDA notebook's correlation heatmap + VIF section), dropped by clean_dataset()
   redundant_columns: ["prior_offenses", "age_in_months", "juvenile_total"]
 
 preprocessing:
-  encoder: "target"      # winner of the 4x4 empirical grid (onehot/ordinal/count/target x none/standard/minmax/robust),
-  scaler: "standard"     # scored on accuracy across 15 repeated splits -- see 02_preprocessing.ipynb's grid + paired check
+  # encoder and scaler are chosen by hand (any alternative is one config change away):
+  encoder: "target"      # compact (one column per feature instead of one per category) and informative; reads y, but sklearn's
+                         # TargetEncoder is cross-fitted, so a row's own label never leaks into its own encoding
+  scaler: "robust"       # median/IQR: the few extreme counts (priors_count) don't set the scale for everyone else
+  random_state: 42       # seeds the target encoder's internal cross-fitting
   numeric_features: ["age", "juv_fel_count", "juv_misd_count", "juv_other_count", "priors_count"]
   categorical_features: ["sex", "age_cat", "c_charge_degree"]
-  mnar_indicator_sources: ["priors_count", "c_charge_degree"]
+  mnar_indicator_sources: ["priors_count", "c_charge_degree"]   # -> adds priors_count_was_missing, c_charge_degree_was_missing
+  # only used by the "ordinal" encoder: a meaningful order per column (alphabetical would be arbitrary)
+  ordinal_categories:
+    sex: ["Female", "Male"]
+    age_cat: ["Less than 25", "25 - 45", "Greater than 45"]
+    c_charge_degree: ["M", "F"]    # misdemeanor < felony
   imputation:
     numeric_strategy: "median"        # applies to age, juv_fel_count, juv_misd_count, juv_other_count, priors_count
     categorical_strategy: "most_frequent"   # applies to sex, age_cat, c_charge_degree
 
 model:
-  type: "logistic_regression"   # or "decision_tree"
+  type: "logistic_regression"   # or "dummy" (majority-class floor to beat), "decision_tree", "random_forest"
   params:
     max_iter: 2000
 
