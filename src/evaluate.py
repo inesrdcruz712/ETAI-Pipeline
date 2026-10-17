@@ -1,5 +1,5 @@
 """
-Evaluation (week 4) -- stratified k-fold cross-validation of the WHOLE pipeline.
+Evaluation -- stratified k-fold cross-validation of the WHOLE pipeline, and the reports built on it.
 
 One train/validation split gives one number, and a different seed would give a different one.
 Cross-validation splits the development set into k folds; every fold takes a turn as the validation
@@ -12,66 +12,98 @@ The locked test set is never touched here.
 """
 import numpy as np
 import pandas as pd
-from sklearn.base import clone
-from sklearn.metrics import accuracy_score, classification_report
-from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import classification_report
+from scipy import stats
+from sklearn.model_selection import StratifiedKFold, cross_validate
 
-
-def cross_validate_pipeline(pipeline, X_dev, y_dev, cv_config: dict):
-    """
-    Returns (fold_table, oof_pred): per-fold train / validation accuracy and their gap, and the
-    out-of-fold predictions (a numpy array aligned with the rows of X_dev).
-
-    `pipeline` is cloned for every fold, so nothing fitted in one fold can leak into the next.
-    """
+def build_cv(cv_config: dict) -> StratifiedKFold:
+    """The stratified splitter described by config.yaml's `cv` section (same seed = same folds on every run)."""
     shuffle = cv_config.get("shuffle", True)
-    skf = StratifiedKFold(
-        n_splits=cv_config["n_splits"],
-        shuffle=shuffle,
-        random_state=cv_config.get("random_state") if shuffle else None,
-    )
+    return StratifiedKFold(n_splits=cv_config["n_splits"], shuffle=shuffle,
+                           random_state=cv_config.get("random_state") if shuffle else None)
 
-    oof_pred = np.empty(len(y_dev), dtype=int)
-    rows = []
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X_dev, y_dev), start=1):
-        fold_pipeline = clone(pipeline)
-        fold_pipeline.fit(X_dev.iloc[train_idx], y_dev.iloc[train_idx])
+def cross_validate_pipeline(pipeline, X, y, cv, scoring: str = "accuracy", n_jobs: int = 1):
+    """
+    Fits a fresh copy of `pipeline` on each fold's training part and scores it on that
+    fold's validation part. Because `pipeline` contains the preprocessing too, imputation
+    medians, encoder statistics and scaler means are re-learned inside every fold -- the
+    validation fold never influences its own preprocessing.
+    
+    Returns (fold_scores, y_oof):
+      - fold_scores: one row per fold -- train score, validation score, and the gap between
+        them (a large, consistent gap = overfitting).
+      - y_oof: out-of-fold predictions. Every row gets a prediction from the one fold model
+        that did NOT train on it, so all of them are "unseen" -- what the classification
+        report and fairness check are computed on (more rows, and the locked test set stays
+        untouched). Taken from the same fits as the scores, so nothing is fitted twice.
+    """
+    scores = cross_validate(pipeline, X, y, cv=cv, scoring=scoring, return_train_score=True,
+                            return_estimator=True, return_indices=True, n_jobs=n_jobs)
+    fold_scores = pd.DataFrame({
+        "fold": range(1, len(scores["test_score"]) + 1),
+        "train": scores["train_score"],
+        "validation": scores["test_score"],
+    })
+    fold_scores["gap"] = fold_scores["train"] - fold_scores["validation"]
+    
+    y_oof = np.empty(len(X), dtype=np.asarray(y).dtype)
+    for model, val_idx in zip(scores["estimator"], scores["indices"]["test"]):
+        y_oof[val_idx] = model.predict(X.iloc[val_idx])
+    return fold_scores, y_oof
 
-        train_pred = fold_pipeline.predict(X_dev.iloc[train_idx])
-        val_pred = fold_pipeline.predict(X_dev.iloc[val_idx])
-        oof_pred[val_idx] = val_pred
 
-        train_acc = accuracy_score(y_dev.iloc[train_idx], train_pred)
-        val_acc = accuracy_score(y_dev.iloc[val_idx], val_pred)
-        rows.append({"fold": fold, "train_acc": train_acc, "val_acc": val_acc, "gap": train_acc - val_acc})
-
-    return pd.DataFrame(rows), oof_pred
-
-
-def cv_report(fold_table: pd.DataFrame, y_dev, oof_pred) -> str:
-    """Per-fold table + mean +- std + classification report on the out-of-fold predictions. Printed and returned."""
-    k = len(fold_table)
-    table = fold_table.copy()
-    table["fold"] = table["fold"].astype(str)
-    mean, std = fold_table[["train_acc", "val_acc", "gap"]].mean(), fold_table[["train_acc", "val_acc", "gap"]].std()
-    table.loc[len(table)] = ["mean", mean["train_acc"], mean["val_acc"], mean["gap"]]
-    table.loc[len(table)] = ["std", std["train_acc"], std["val_acc"], std["gap"]]
-
+def cv_report(fold_scores: pd.DataFrame, scoring: str = "accuracy", title: str = None) -> str:
+    """Per-fold table + mean +/- std, as text (printed, and saved to results/)."""
     lines = [
-        f"Stratified {k}-fold cross-validation on the development set ({len(y_dev)} rows)",
-        "(preprocessing + model are refitted from scratch inside every fold)",
+        title or f"Cross-validation ({len(fold_scores)} stratified folds, metric: {scoring})",
         "",
-        table.to_string(index=False, formatters={c: "{:+.3f}".format if c == "gap" else "{:.3f}".format
-                                                 for c in ["train_acc", "val_acc", "gap"]}),
+        fold_scores.to_string(index=False, float_format=lambda v: f"{v:.3f}"),
         "",
-        f"Validation accuracy: {mean['val_acc']:.3f} +- {std['val_acc']:.3f}",
-        f"Train - validation gap: {mean['gap']:+.3f} +- {std['gap']:.3f}   "
-        "(a large positive gap means the model memorised the training rows)",
-        "",
-        "Classification report (out-of-fold predictions, every development row predicted by a model that never saw it):",
-        classification_report(y_dev, oof_pred),
     ]
+    for col in ["train", "validation", "gap"]:
+        sign = "+" if col == "gap" else ""
+        lines.append(f"{col.capitalize():<11s} mean = {fold_scores[col].mean():{sign}.3f}   "
+                     f"std = {fold_scores[col].std(ddof=1):.3f}")
     text = "\n".join(lines)
+    print(text)
+    return text
+
+def corrected_paired_test(scores_a, scores_b, n_train: int, n_test: int) -> dict:
+    """
+    Nadeau & Bengio's corrected paired t-test: is model A really better than model B, or is the
+    difference within fold-to-fold noise?
+
+    `scores_a` / `scores_b` are the two models' scores on the SAME folds (same cv.random_state), so
+    they can be paired fold by fold; `n_train` / `n_test` are the rows in one fold's training / validation
+    part. The plain paired t-test treats the k differences as independent, but CV folds share most of their
+    training rows, so the differences are correlated and the plain test is far too confident. The correction
+    inflates the variance by (1/k + n_test/n_train):
+
+        t = mean(d) / sqrt((1/k + n_test/n_train) * var(d)),   df = k - 1,   two-sided p-value
+
+    Returns a dict: mean_diff (A - B), std_diff, t, p_value, and `significant` (p < 0.05).
+    Only call A "better" when `significant` is True; otherwise the lead is as large as the noise.
+    """
+    d = np.asarray(scores_a, dtype=float) - np.asarray(scores_b, dtype=float)
+    k = len(d)
+    if k < 2:
+        raise ValueError("Need scores from at least 2 folds to compare two models.")
+    var = d.var(ddof=1)
+    mean = d.mean()
+    if var == 0:
+        # identical differences in every fold: no noise to compare against (t is 0 or infinite)
+        t_stat = 0.0 if mean == 0 else np.inf * np.sign(mean)
+        p_value = 1.0 if mean == 0 else 0.0
+    else:
+        t_stat = mean / np.sqrt((1.0 / k + n_test / n_train) * var)
+        p_value = 2 * stats.t.sf(abs(t_stat), df=k - 1)
+    return {"mean_diff": float(mean), "std_diff": float(np.sqrt(var)), "t": float(t_stat),
+            "p_value": float(p_value), "significant": bool(p_value < 0.05)}
+
+def oof_classification_report(y_true, y_pred) -> str:
+    """Classification report on the out-of-fold predictions."""
+    text = "Classification report (out-of-fold predictions, development set):\n" + \
+        classification_report(y_true, y_pred, zero_division=0)
     print(text)
     return text
 
