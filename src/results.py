@@ -8,17 +8,16 @@ compare two runs side by side after changing something in config.yaml.
 """
 import os
 from datetime import datetime
+import pandas as pd
 
 
-def save_run(results_dir: str, config: dict, report_text: str) -> str:
+def save_run(results_dir: str, run: str, config: dict, report_text: str) -> str:
     """
     Writes one run's full report to a timestamped .txt file inside `results_dir` (created automatically
     if it doesn't exist yet) and returns the path that was written.
     """
     os.makedirs(results_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(results_dir, f"run_{timestamp}.txt")
+    path = os.path.join(results_dir, f"run_{run}.txt")
 
     prep, test_set, cv = config["preprocessing"], config["test_set"], config["cv"]
     tuning = config.get("tuning", {})
@@ -28,17 +27,26 @@ def save_run(results_dir: str, config: dict, report_text: str) -> str:
     else:
         tuning_line = "Tuning: off\n"
     header = (
-        f"Run: {timestamp}\n"
+        f"Run: {run}\n"
         f"Model: {config['model']['type']}  params={config['model'].get('params')}\n"
         f"Preprocessing: encoder={prep['encoder']}  scaler={prep['scaler']}\n"
         f"Locked test set: size={test_set['size']}  random_state={test_set['random_state']}\n"
         f"Cross-validation: {cv['n_splits']} folds  shuffle={cv.get('shuffle', True)}  "
-        f"random_state={cv.get('random_state')}  scoring={cv.get('scoring', 'accuracy')}\n"
-                + tuning_line
-                + "=" * 60 + "\n\n"
+        f"random_state={cv.get('random_state')}\n"
+        f"Metrics: {cv['metrics']}  selection metric: {cv['selection_metric']}\n"
+        + tuning_line
+        + "=" * 60 + "\n\n"
     )
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(header + report_text)
 
     return path
+
+def save_scores(path: str, row: dict) -> pd.DataFrame:
+    """Appends one run to the CSV at `path` (created if needed) and returns all runs."""
+    runs = pd.read_csv(path, dtype={"run": str}) if os.path.exists(path) else pd.DataFrame()
+    runs = pd.concat([runs, pd.DataFrame([row])], ignore_index=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    runs.to_csv(path, index=False)
+    return runs

@@ -1,11 +1,12 @@
 """Model construction."""
 import inspect
 from sklearn.dummy import DummyClassifier
-from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, BaggingClassifier
+from sklearn.ensemble import AdaBoostClassifier, BaggingClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.random_projection import SparseRandomProjection
+from sklearn.naive_bayes import GaussianNB
 
 from src.preprocessing import build_preprocessor
 
@@ -47,9 +48,15 @@ _MODELS = {
     # subset of features at every split; predictions are averaged. Untuned for now.
     "random_forest": RandomForestClassifier,
     # the same, but every split is a random linear combination of the features (week 6)
-        "oblique_random_forest": oblique_random_forest,
-        # trees built one after another, each focused on the rows the previous ones got wrong (week 6)
-        "adaboost": adaboost,
+    "oblique_random_forest": oblique_random_forest,
+    # trees built one after another, each focused on the rows the previous ones got wrong (week 6)
+    "adaboost": adaboost,
+    # every shallow tree fits the GRADIENT of the log-loss left by the trees before it (week 7)
+    "gradient_boosting": GradientBoostingClassifier,
+    # the same idea on binned features: much faster on large data, and handles missing values itself (week 7)
+    "hist_gradient_boosting": HistGradientBoostingClassifier,
+    # a fast probabilistic baseline: features independent and Gaussian within each class (week 7)
+    "naive_bayes": GaussianNB,
 }
 
 def build_model(model_config: dict):
